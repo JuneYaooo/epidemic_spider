@@ -26,7 +26,12 @@ class Crawler:
         self.spider_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         today = datetime.date.today()
         self.yesterday = str(today - datetime.timedelta(days=1))
+        self.yesterday_format = (datetime.date.today() - datetime.timedelta(days=1)).strftime('%Y%m%d')
         self.source = 'none'
+        self.columns = ['EMGRPID', 'EPIDDTC', 'EPSAREA', 'EPCNT', 'EPPROV', 'EPCITY', 'EPDIST', 'EPRLEVEL', 'EPNLC', 'EPNLAC', 'EPNIC',
+                        'EPEOIC', 'EPEDC', 'EPCDC', 'EPCNUM', 'EPDTNUM', 'EPSDTC', 'EPSOUR', 'ETLDTC']
+        self.Municipality = ['北京', '上海', '天津', '重庆']
+        self.int_col = ['EMGRPID', 'EPNLC', 'EPNLAC', 'EPNIC', 'EPEOIC', 'EPEDC', 'EPCDC', 'EPCNUM', 'EPDTNUM']
 
     def run(self):
         pass
@@ -56,6 +61,13 @@ class Crawler:
         df = pd.merge(df, risk_df, left_on=['EPPROV', 'EPCITY'], right_on=['RSPROV', 'RSCITY'], how='left')
         df.fillna("", inplace=True)
         df['EPRLEVEL'] = df['RSLEVEL']
+        df = df.reset_index(drop=True)
+        # ID编码规则，日期+平台码+自增码，01为baidu, 02为腾讯, 未知是00
+        code = 1 if self.source=='baidu' else 2 if self.source =='tengxun' else 0
+        df['EMGRPID'] = df.index + int(self.yesterday_format)*1000000+code*10000
+        df['EPCITY_copy'] = df['EPCITY'].copy()
+        df['EPCITY'] = df.apply(lambda row: '' if row['EPPROV'] in self.Municipality else row['EPCITY_copy'], axis=1)
+        df['EPDIST'] = df.apply(lambda row: row['EPCITY_copy'] if row['EPPROV'] in self.Municipality else '', axis=1)
         df = df[self.columns]
         df.to_sql(name=self.table, con=engine, if_exists='append', index=False, index_label=False)
         print('数据更新成功！')
@@ -98,9 +110,6 @@ class Crawler_baidu(Crawler):
     def __init__(self, host, user, passwd, db, table):
         super().__init__(host, user, passwd, db, table)
         self.source = 'baidu'
-        self.columns = ['EPIDDTC', 'EPSAREA', 'EPCNT', 'EPPROV', 'EPCITY', 'EPRLEVEL', 'EPNLC', 'EPNLAC', 'EPNIC',
-                        'EPEHC',
-                        'EPEOIC', 'EPEDC', 'EPCDC', 'EPCNUM', 'EPDTNUM', 'EPSDTC', 'EPSOUR', 'ETLDTC']
 
     def run(self):
         # get data from internet
@@ -130,8 +139,10 @@ class Crawler_baidu(Crawler):
         chinaList = json_str["component"][0]["caseList"]
         globalList = json_str["component"][0]["globalList"]
         lastUpdateTime = json_str["component"][0]["mapLastUpdatedTime"]
+        summaryDataIn = json_str["component"][0]['summaryDataIn']
+        summaryDataOut = json_str["component"][0]['summaryDataOut']
         print('finished crawled from baidu(epidemic info)!!')
-        return [chinaList, globalList, lastUpdateTime]
+        return [chinaList, globalList, lastUpdateTime, summaryDataIn, summaryDataOut]
 
     def structure_data(self, raw_data):
         lastUpdateTime = raw_data[2].replace(".", "-")
@@ -140,38 +151,50 @@ class Crawler_baidu(Crawler):
         new_df = pd.DataFrame(columns=self.columns)
         i = 0
         for index, row in raw_df.iterrows():
-            overseas_confirmedRelative, overseas_curConfirm = '', ''
+            overseas_confirmedRelative, overseas_curConfirm = 0, 0
             for item in row['subList']:
                 if item['city'] == '境外输入':
                     overseas_confirmedRelative = item['confirmedRelative']
                     overseas_curConfirm = item['curConfirm']
-                else:
-                    # item['city'] = item['city'].replace("区", "")
-                    new_df.loc[i] = [lastUpdateTime, '亚洲', '中国', row['area'], item['city'], '', item['nativeRelative'],
-                                     item['asymptomaticRelative'], '', item['curConfirm'], '', item['curConfirm'],
-                                     item['confirmed'], item['crued'], item['died'], self.yesterday, self.source, self.spider_time]
-                    i += 1
-            new_df.loc[i] = [lastUpdateTime, '亚洲', '中国', row['area'], '', '', row['nativeRelative'],
-                             row['asymptomaticRelative'], overseas_confirmedRelative, row['curConfirm'],
+                new_df.loc[i] = [0, lastUpdateTime, '亚洲', '中国', row['area'], item['city'], "", '', item['nativeRelative'],
+                                 item['asymptomaticRelative'], 0, 0, item['curConfirm'],
+                                 item['confirmed'], item['crued'], item['died'], self.yesterday, self.source, self.spider_time]
+                i += 1
+            new_df.loc[i] = [0, lastUpdateTime, '亚洲', '中国', row['area'], '', '', '', row['nativeRelative'],
+                             row['asymptomaticRelative'], overseas_confirmedRelative,
                              overseas_curConfirm, row['curConfirm'], row['confirmed'], row['crued'], row['died'],
                              self.yesterday, self.source, self.spider_time]
             i += 1
 
+        # 中国的总和
+        summaryDataIn = raw_data[3]
+        new_df.loc[i] = [0, lastUpdateTime, '亚洲', '中国', '', '', '', '', summaryDataIn['curConfirmRelative'],
+                         summaryDataIn['asymptomaticRelative'],
+                         summaryDataIn['overseasInputRelative'], summaryDataIn['overseasInput'],
+                         summaryDataIn['curConfirm'], summaryDataIn['confirmed'], summaryDataIn['cured'],
+                         summaryDataIn['died'], self.yesterday, self.source, self.spider_time]
+        i += 1
+        # 世界的总和
+        summaryDataOut= raw_data[4]
+        new_df.loc[i] = [0, lastUpdateTime, '世界', '', '', '', '', '', summaryDataOut['confirmedRelative'], 0,
+                         0, 0,
+                         summaryDataOut['curConfirm'], summaryDataOut['confirmed'], summaryDataOut['cured'],
+                         summaryDataOut['died'], self.yesterday, self.source, self.spider_time]
+        i += 1
         # 国外疫情
         aboard_df = pd.DataFrame(raw_data[1])
         for index, row in aboard_df.iterrows():
             if row['area'] != '热门':
                 for item in row['subList']:
-                    new_df.loc[i] = [lastUpdateTime, row['area'], item['country'], '', '', '', item['confirmedRelative'], 0,
+                    new_df.loc[i] = [0,lastUpdateTime, row['area'], item['country'], '', '', '', '', item['confirmedRelative'],
                                      0, 0, 0, item['curConfirm'], item['confirmed'], item['crued'], item['died'],
                                      self.yesterday, self.source, self.spider_time]
                     i += 1
-                new_df.loc[i] = [lastUpdateTime, row['area'], '', '', '', '', row['confirmedRelative'], 0,
+                new_df.loc[i] = [0,lastUpdateTime, row['area'], '', '', '', '', '', row['confirmedRelative'],
                                  0, 0, 0, row['curConfirm'], row['confirmed'], row['crued'],
                                  row['died'], self.yesterday, self.source, self.spider_time]
                 i += 1
-        int_col = ['EPNLC', 'EPNLAC', 'EPNIC', 'EPEHC', 'EPEOIC', 'EPEDC', 'EPCDC', 'EPCNUM', 'EPDTNUM']
-        for col in int_col:
+        for col in self.int_col:
             new_df[col] = pd.to_numeric(new_df[col], errors='coerce').fillna(0).astype(int)
 
         return new_df
@@ -180,8 +203,6 @@ class  Crawler_tengxun(Crawler):
     def __init__(self, host, user, passwd,  db, table):
         super().__init__(host, user, passwd,  db, table)
         self.source = 'tengxun'
-        self.columns = ['EPIDDTC', 'EPSAREA', 'EPCNT', 'EPPROV', 'EPCITY', 'EPRLEVEL', 'EPNLC', 'EPNLAC', 'EPNIC', 'EPEHC',
-                     'EPEOIC', 'EPEDC', 'EPCDC', 'EPCNUM', 'EPDTNUM', 'EPSDTC', 'EPSOUR', 'ETLDTC']
 
     def run(self):
         # get data from internet
@@ -207,6 +228,9 @@ class  Crawler_tengxun(Crawler):
                 res = response.json()
                 chinaList = res['data']["diseaseh5Shelf"]["areaTree"][0]["children"]
                 lastUpdateTime = res['data']["diseaseh5Shelf"]["lastUpdateTime"]
+                chinaTotal = res['data']["diseaseh5Shelf"]['chinaTotal']
+                chinaAdd = res['data']["diseaseh5Shelf"]['chinaAdd']
+
         except requests.ConnectionError as e:
             print('catch china List wrong from tengxun', e.args)
 
@@ -223,10 +247,11 @@ class  Crawler_tengxun(Crawler):
             if response.status_code == 200:
                 res = response.json()
                 globalList = res['data']['WomAboard']
+                WomWorld = res['data']['WomWorld']
 
         except requests.ConnectionError as e:
             print('catch china List wrong from tengxun', e.args)
-        return [chinaList, globalList, lastUpdateTime]
+        return [chinaList, globalList, lastUpdateTime, chinaTotal, chinaAdd, WomWorld]
 
     def structure_data(self, raw_data):
         # 国内
@@ -236,23 +261,35 @@ class  Crawler_tengxun(Crawler):
             columns=self.columns)
         i = 0
         for index, row in raw_df.iterrows():
-            overseas_confirmedRelative, overseas_curConfirm = '', ''
+            overseas_confirmedRelative, overseas_curConfirm = 0, 0
             for item in row['children']:
                 if item['name'] == '境外输入':
                     overseas_confirmedRelative = item['today']['confirm']
                     overseas_curConfirm = item['total']['nowConfirm']
-                else:
-
-                    new_df.loc[i] = [lastUpdateTime, '亚洲', '中国', row['name'], item['name'], '', item['today']['confirm'], '',
-                                     '', item['total']['nowConfirm'], '', item['total']['nowConfirm'],
-                                     item['total']['confirm'], item['total']['heal'], item['total']['dead'],
-                                     self.yesterday, self.source, self.spider_time]
-                    i += 1
-            new_df.loc[i] = [lastUpdateTime, '亚洲', '中国', row['name'], '', '', row['today']['confirm'], '',
-                             overseas_confirmedRelative, row['total']['nowConfirm'], overseas_curConfirm,
+                new_df.loc[i] = [0, lastUpdateTime, '亚洲', '中国', row['name'], item['name'], '', '', item['today']['confirm'], 0,
+                                 0, 0, item['total']['nowConfirm'],
+                                 item['total']['confirm'], item['total']['heal'], item['total']['dead'],
+                                 self.yesterday, self.source, self.spider_time]
+                i += 1
+            new_df.loc[i] = [0, lastUpdateTime, '亚洲', '中国', row['name'], '', '', '', row['today']['confirm'], 0,
+                             overseas_confirmedRelative,  overseas_curConfirm,
                              row['total']['nowConfirm'], row['total']['confirm'], row['total']['heal'],
                              row['total']['dead'], self.yesterday, self.source, self.spider_time]
             i += 1
+
+        # 中国的总和
+        chinaTotal,chinaAdd = raw_data[3], raw_data[4]
+        new_df.loc[i] = [0, lastUpdateTime, '亚洲', '中国', '', '', '', '', chinaAdd['localConfirmH5'], chinaAdd['noInfect'],
+                         chinaAdd['importedCase'], chinaTotal['importedCase'],
+                         chinaTotal['localConfirmH5'], chinaTotal['confirm'], chinaTotal['heal'],
+                         chinaTotal['dead'], self.yesterday, self.source, self.spider_time]
+        i += 1
+        # 世界的总和
+        WomWorld = raw_data[5]
+        new_df.loc[i] = [0, lastUpdateTime, '世界', '', '', '', '', '', WomWorld['confirmAdd'], 0,
+                         0, 0,
+                         WomWorld['nowConfirm'], WomWorld['confirm'], WomWorld['heal'],
+                         WomWorld['dead'], self.yesterday, self.source, self.spider_time]
 
         # 国外疫情
         aboard_df = pd.DataFrame(raw_data[1])
@@ -271,8 +308,7 @@ class  Crawler_tengxun(Crawler):
         # 合并
         new_all_df = pd.concat([new_df, aboard_df], ignore_index=True)
         # 列格式调整
-        int_col = ['EPNLC', 'EPNLAC', 'EPNIC', 'EPEHC', 'EPEOIC', 'EPEDC', 'EPCDC', 'EPCNUM', 'EPDTNUM']
-        for col in int_col:
+        for col in self.int_col:
             new_all_df[col] = pd.to_numeric(new_all_df[col], errors='coerce').fillna(0).astype(int)
         # 对腾讯中的中国城市命名做规范化处理，对标百度数据
         cityMap = pd.read_csv('cityMap.csv')
@@ -333,7 +369,7 @@ class  Crawler_tengxun_risk(Crawler):
                 tmpDict = {}
                 tmpDict['RSPROV'] = province['provinceName']
                 tmpDict['RSCITY'] = city['cityName']
-                if city['cityName'].replace('市', '') in ['北京', '上海', '天津', '重庆']:
+                if city['cityName'].replace('市', '') in self.Municipality:
                     tmpDict['RSPROV'] = province['provinceName']
                     tmpDict['RSCITY'] = city['areaName']
                 tmpDict['mid_dander_area'] = '中风险'
@@ -345,7 +381,7 @@ class  Crawler_tengxun_risk(Crawler):
                 tmpDict = {}
                 tmpDict['RSPROV'] = province['provinceName']
                 tmpDict['RSCITY'] = city['cityName']
-                if city['cityName'].replace('市', '') in ['北京', '上海', '天津', '重庆']:
+                if city['cityName'].replace('市', '') in self.Municipality:
                     tmpDict['RSPROV'] = province['provinceName']
                     tmpDict['RSCITY'] = city['areaName']
                 tmpDict['RSLEVEL'] = '高风险'
@@ -403,9 +439,9 @@ if __name__ == '__main__':
     crawler = Crawler_tengxun_risk('localhost', 'root', '123456', 'test', 'risk')
     crawler.run()
     # tengxun
-    crawler = Crawler_tengxun('localhost', 'root', '123456', 'test', 'ep')
+    crawler = Crawler_tengxun('localhost', 'root', '123456', 'test', 'edr_epidemic_information')
     crawler.run()
     # baidu
-    crawler = Crawler_baidu('localhost', 'root', '123456', 'test', 'ep')
+    crawler = Crawler_baidu('localhost', 'root', '123456', 'test', 'edr_epidemic_information')
     crawler.run()
     # os.system('pause')
